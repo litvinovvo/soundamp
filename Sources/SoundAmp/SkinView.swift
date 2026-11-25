@@ -102,9 +102,10 @@ class SkinView: NSView {
 
     func draw(_ sprite: Sprite?, at x: CGFloat, _ y: CGFloat) { draw(sprite, at: CGPoint(x: x, y: y)) }
 
-    func draw(image: CGImage, in r: CGRect) {
+    func draw(image: CGImage, in r: CGRect, interpolation: CGInterpolationQuality = .none) {
         guard let ctx else { return }
         ctx.saveGState()
+        ctx.interpolationQuality = interpolation
         ctx.translateBy(x: r.minX, y: r.maxY)
         ctx.scaleBy(x: 1, y: -1)
         ctx.draw(image, in: CGRect(origin: .zero, size: r.size))
@@ -140,6 +141,16 @@ class SkinView: NSView {
         ctx?.restoreGState()
     }
 
+    /// Draw flipped left-to-right across the window (when `on`).
+    func mirrored(_ on: Bool, _ body: () -> Void) {
+        guard on else { return body() }
+        ctx?.saveGState()
+        ctx?.translateBy(x: skinSize.width, y: 0)
+        ctx?.scaleBy(x: -1, y: 1)
+        body()
+        ctx?.restoreGState()
+    }
+
     /// Text in the skin's 5×6 bitmap font (text.bmp).
     func drawText(_ text: String, at p: CGPoint) {
         var x = p.x
@@ -161,6 +172,19 @@ class SkinView: NSView {
         ctx?.saveGState()
         ctx?.setShouldAntialias(true)
         NSString(string: s).draw(with: r, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine], attributes: attrs)
+        ctx?.restoreGState()
+    }
+
+    func drawCentered(_ s: String, in r: CGRect, color: RGBA, font: NSFont, alpha: CGFloat = 1) {
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: font, .kern: 0.4,
+            .foregroundColor: NSColor(srgbRed: CGFloat(color.r) / 255, green: CGFloat(color.g) / 255, blue: CGFloat(color.b) / 255, alpha: alpha),
+        ]
+        let text = NSAttributedString(string: s, attributes: attrs)
+        let size = text.size()
+        ctx?.saveGState()
+        ctx?.setShouldAntialias(true)
+        text.draw(at: CGPoint(x: r.midX - size.width / 2, y: r.midY - size.height / 2))
         ctx?.restoreGState()
     }
 

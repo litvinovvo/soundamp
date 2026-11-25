@@ -7,6 +7,7 @@ struct WidgetSound {
     let title: String
     let artist: String
     let durationMs: Double
+    let artworkURL: String
     let permalink: String
     let policy: String
 
@@ -16,6 +17,7 @@ struct WidgetSound {
         title = dict["title"] as? String ?? ""
         artist = dict["artist"] as? String ?? ""
         durationMs = (dict["duration"] as? NSNumber)?.doubleValue ?? 0
+        artworkURL = dict["artwork"] as? String ?? ""
         permalink = dict["permalink"] as? String ?? ""
         policy = dict["policy"] as? String ?? ""
     }
@@ -37,6 +39,7 @@ struct WidgetSound {
         if !artist.isEmpty { t.artist = artist }
         if durationMs > 0 { t.durationMs = durationMs }
         t.soundID = id
+        if !artworkURL.isEmpty { t.artworkURL = artworkURL }
         if !permalink.isEmpty { t.permalink = permalink }
         switch policy {
         case "BLOCK": t.status = .unavailable; t.note = "blocked"

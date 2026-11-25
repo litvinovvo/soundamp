@@ -1,16 +1,17 @@
 import AppKit
 import SoundAmpCore
 
-/// Creates the three Winamp windows and handles docking, snapping, double size
+/// Creates the Winamp windows and handles docking, snapping, double size
 /// and always-on-top.
 @MainActor
 final class WindowManager {
     let main: SkinWindow
     let equalizer: SkinWindow
     let playlist: SkinWindow
-    var all: [SkinWindow] { [main, equalizer, playlist] }
+    let artwork: SkinWindow
+    var all: [SkinWindow] { [main, equalizer, playlist, artwork] }
     /// Windows positioned relative to the main window.
-    private var satellites: [SkinWindow] { [equalizer, playlist] }
+    private var satellites: [SkinWindow] { [equalizer, playlist, artwork] }
     var visible: [SkinWindow] { all.filter(\.isVisible) }
 
     private(set) var scale: CGFloat = WindowManager.clampScale(CGFloat(Settings.uiScale))
@@ -30,10 +31,11 @@ final class WindowManager {
     private var dragging: SkinWindow?
     private let snapDistance: CGFloat = 10
 
-    init(mainView: SkinView, eqView: SkinView, playlistView: SkinView) {
+    init(mainView: SkinView, eqView: SkinView, playlistView: SkinView, artworkView: SkinView) {
         main = SkinWindow(name: "main", view: mainView)
         equalizer = SkinWindow(name: "equalizer", view: eqView)
         playlist = SkinWindow(name: "playlist", view: playlistView)
+        artwork = SkinWindow(name: "artwork", view: artworkView)
         for w in all { w.skinView.scale = scale }
         applyAlwaysOnTop()
         NotificationCenter.default.addObserver(forName: SkinManager.didChange, object: nil, queue: .main) { _ in
@@ -65,7 +67,7 @@ final class WindowManager {
         main.setFrameTopLeftPoint(topLeft)
         let offsets = Settings.windowOffsets
         var y = main.frame.minY
-        for w in satellites {
+        for w in [equalizer, playlist] {
             if let off = offsets[w.identifierName] {
                 w.setFrameTopLeftPoint(NSPoint(x: topLeft.x + off.x * scale, y: topLeft.y - off.y * scale))
             } else {
@@ -76,6 +78,11 @@ final class WindowManager {
         main.makeKeyAndOrderFront(nil)
         if Settings.showEqualizer { equalizer.orderFront(nil) }
         if Settings.showPlaylist { playlist.orderFront(nil) }
+        if Settings.showArtwork {
+            place(artwork)
+            artwork.orderFront(nil)
+            artwork.skinView.redraw()
+        }
     }
 
     func resizeAll() {
@@ -91,13 +98,15 @@ final class WindowManager {
     func savePositions() {
         let tl = NSPoint(x: main.frame.minX, y: main.frame.maxY)
         Settings.mainOrigin = tl
-        var offsets: [String: CGPoint] = [:]
-        for w in satellites {
+        // Hidden windows keep the spot they had when they were closed.
+        var offsets = Settings.windowOffsets
+        for w in satellites where w.isVisible {
             offsets[w.identifierName] = CGPoint(x: (w.frame.minX - tl.x) / scale, y: (tl.y - w.frame.maxY) / scale)
         }
         Settings.windowOffsets = offsets
         Settings.showEqualizer = equalizer.isVisible
         Settings.showPlaylist = playlist.isVisible
+        Settings.showArtwork = artwork.isVisible
     }
 
     // MARK: Scale / always on top / toggles
@@ -156,16 +165,67 @@ final class WindowManager {
     }
 
     func toggle(_ w: SkinWindow) {
-        if w.isVisible { w.orderOut(nil) } else { w.orderFront(nil) }
+        if w.isVisible {
+            savePositions() // remember where it was
+            w.orderOut(nil)
+        } else {
+            place(w)
+            w.orderFront(nil)
+            w.skinView.redraw()
+        }
         savePositions()
         NotificationCenter.default.post(name: PlayerController.didChange, object: nil)
     }
 
-    /// Playlist resized (in 25×29 segments): keep its top-left fixed.
-    func playlistResized() {
-        let w = playlist
+    /// Put a hidden window back where it was relative to the main window.
+    /// The artwork window opens beside the others until it has been placed.
+    private func place(_ w: SkinWindow) {
+        if let off = Settings.windowOffsets[w.identifierName] {
+            w.setFrameTopLeftPoint(NSPoint(x: main.frame.minX + off.x * scale, y: main.frame.maxY - off.y * scale))
+            let header = NSRect(x: w.frame.minX, y: w.frame.maxY - 20 * scale, width: w.frame.width, height: 20 * scale)
+            if w !== artwork || NSScreen.screens.contains(where: { $0.visibleFrame.contains(header) }) { return }
+        }
+        guard w === artwork else { return }
+        let screen = (main.screen ?? NSScreen.main)?.visibleFrame ?? main.frame
+        let size = w.frame.size
+        let frames = [main.frame] + visible.filter { $0 !== main && $0 !== w }.map(\.frame)
+        let candidates = frames.flatMap { f in
+            [NSPoint(x: f.maxX, y: f.maxY - size.height), NSPoint(x: f.minX - size.width, y: f.maxY - size.height),
+             NSPoint(x: f.minX, y: f.minY - size.height), NSPoint(x: f.minX, y: f.maxY)]
+        }.map { NSRect(origin: $0, size: size) }
+        let free = candidates.first { c in screen.contains(c) && frames.allSatisfy { !c.intersects($0) } }
+        let fallback = NSPoint(x: max(screen.minX, min(main.frame.maxX, screen.maxX - size.width)),
+                               y: max(screen.minY, min(main.frame.maxY - size.height, screen.maxY - size.height)))
+        w.setFrameOrigin(free?.origin ?? fallback)
+    }
+
+    /// Artwork height (skin pixels) for a corner drag: fits the screen and snaps its
+    /// right and bottom edges to the other windows' edges.
+    func artworkHeight(dragged height: CGFloat, minimum: CGFloat, extraWidth: CGFloat) -> CGFloat {
+        let f = artwork.frame
+        let extra = extraWidth * scale
+        var size = height * scale
+        var best: CGFloat?
+        for o in visible.filter({ $0 !== artwork }).map(\.frame) {
+            for x in [o.minX, o.maxX] { consider(x - (f.minX + size + extra), &best) }
+            for y in [o.minY, o.maxY] { consider((f.maxY - y) - size, &best) }
+        }
+        size += best ?? 0
+        if let screen = (artwork.screen ?? NSScreen.main)?.visibleFrame {
+            size = min(size, screen.maxX - f.minX - extra, f.maxY - screen.minY)
+        }
+        return max(minimum, (size / scale).rounded(.down))
+    }
+
+    /// A window's skin size changed (playlist segments, artwork): keep its top-left fixed,
+    /// or its top-right if asked to and that's the side docked to another window.
+    func resized(_ w: SkinWindow, keepDockedEdge: Bool = false) {
         let size = NSSize(width: w.skinView.skinSize.width * scale, height: w.skinView.skinSize.height * scale)
-        w.setFrame(NSRect(x: w.frame.minX, y: w.frame.maxY - size.height, width: size.width, height: size.height), display: true)
+        let docked = visible.filter { $0 !== w && touching($0.frame, w.frame) }
+        let keepRight = keepDockedEdge && docked.contains { abs($0.frame.minX - w.frame.maxX) <= 1.5 }
+        w.setFrame(NSRect(x: keepRight ? w.frame.maxX - size.width : w.frame.minX, y: w.frame.maxY - size.height,
+                          width: size.width, height: size.height), display: true)
+        if keepRight { savePositions() }
     }
 
     // MARK: Dragging with docking + snapping

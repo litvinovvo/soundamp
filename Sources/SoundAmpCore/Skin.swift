@@ -20,6 +20,7 @@ public final class Skin {
     private let sheets: [SkinSheet: CGImage]
     private let fallback: Skin?
     private var cache: [Sprite: CGImage] = [:]
+    private var genLetterCache: [Bool: [Character: GenLetter]] = [:]
 
     public init(name: String, archive: ZipArchive, fallback: Skin?) throws {
         self.name = name
@@ -78,6 +79,49 @@ public final class Skin {
         fallback?.sheet(sprite.sheet)
     }
 
+    /// Whether this skin brings its own frame for extra windows (gen.bmp).
+    public var hasGenFrame: Bool {
+        guard let gen = sheets[.gen] else { return false }
+        return gen.width >= 178 && gen.height >= 86
+    }
+
+    /// gen.bmp title letters (A–Z). Widths vary per skin: letters are separated by the color at x 0.
+    /// Most sheets have 7 rows in a piece; the base skin's has 6, with the 7th row stored further down.
+    public func genLetters(active: Bool) -> [Character: GenLetter] {
+        if let cached = genLetterCache[active] { return cached }
+        let y = active ? 88 : 96
+        let row = pixelRow(.gen, y: y)
+        func isSeparator(_ y: Int) -> Bool {
+            let r = pixelRow(.gen, y: y)
+            return r.count < 7 || r[1..<7].allSatisfy { $0 == row.first }
+        }
+        let height = (1..<7).first { isSeparator(y + $0) } ?? 7
+        let lastRow = active ? 95 : 108
+        let split = height == 6 && !isSeparator(lastRow)
+        var letters: [Character: GenLetter] = [:]
+        var x = 1
+        for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" {
+            let end = row.indices.first { $0 >= x && row[$0] == row[0] } ?? row.count
+            guard end > x else { break }
+            letters[c] = GenLetter(body: Sprite(.gen, x, y, end - x, height),
+                                   lastRow: split ? Sprite(.gen, x, lastRow, end - x, 1) : nil)
+            x = end + 1
+        }
+        genLetterCache[active] = letters
+        return letters
+    }
+
+    private func pixelRow(_ sheet: SkinSheet, y: Int) -> [UInt32] {
+        guard let img = self.sheet(sheet), y < img.height,
+              let cropped = img.cropping(to: CGRect(x: 0, y: y, width: img.width, height: 1)) else { return [] }
+        var px = [UInt32](repeating: 0, count: img.width)
+        guard let ctx = CGContext(data: &px, width: img.width, height: 1, bitsPerComponent: 8, bytesPerRow: img.width * 4,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return [] }
+        ctx.draw(cropped, in: CGRect(x: 0, y: 0, width: img.width, height: 1))
+        return px
+    }
+
     /// Color of one pixel of a sheet (used for EQ graph line colors).
     public func pixelColor(_ sheet: SkinSheet, x: Int, y: Int) -> RGBA? {
         guard let img = self.sheet(sheet), x < img.width, y < img.height,
@@ -88,6 +132,18 @@ public final class Skin {
                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
         ctx.draw(cropped, in: CGRect(x: 0, y: 0, width: 1, height: 1))
         return RGBA(px[0], px[1], px[2], px[3])
+    }
+
+    /// Average brightness of a sprite, 0 (black) to 1 (white).
+    public func averageLuminance(_ sprite: Sprite) -> Double {
+        guard let img = image(sprite) else { return 0 }
+        var px = [UInt8](repeating: 0, count: 4)
+        guard let ctx = CGContext(data: &px, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return 0 }
+        ctx.interpolationQuality = .medium
+        ctx.draw(img, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+        return (0.299 * Double(px[0]) + 0.587 * Double(px[1]) + 0.114 * Double(px[2])) / 255
     }
 
     static func decodeImage(_ data: Data) -> CGImage? {

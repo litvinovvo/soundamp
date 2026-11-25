@@ -11,6 +11,7 @@ public struct Track: Identifiable, Equatable, Codable {
     public var durationMs: Double?
     public var soundID: Int?
     public var permalink: String?
+    public var artworkURL: String?
     public var status: Status
     /// "preview only", "blocked", error text…
     public var note: String?

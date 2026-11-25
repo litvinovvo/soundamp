@@ -29,7 +29,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         Env.windows = WindowManager(mainView: MainWindowView(frame: .zero),
                                     eqView: EqualizerWindowView(frame: .zero),
-                                    playlistView: PlaylistWindowView(frame: .zero))
+                                    playlistView: PlaylistWindowView(frame: .zero),
+                                    artworkView: ArtworkWindowView(frame: .zero))
         if options.headless {
             // Windows exist (for snapshots) but are never shown; the widgets live in a
             // 1×1 off-screen window so WebKit keeps running them.

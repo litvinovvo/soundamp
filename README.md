@@ -2,7 +2,7 @@
 
 A native macOS SoundCloud player that wears classic Winamp 2.x skins.
 
-- **Classic skins (.wsz)**: main window, equalizer and playlist editor, drawn pixel-exact from the skin's bitmaps. The windows dock and snap together, and support double size, shade mode and region.txt window shapes. Any bitmap a skin lacks falls back to the Winamp 2.91 base skin, the way Winamp itself does it.
+- **Classic skins (.wsz)**: main window, equalizer, playlist editor and an artwork window (click the song title), drawn pixel-exact from the skin's bitmaps. The windows dock and snap together, and support double size, shade mode and region.txt window shapes. Any bitmap a skin lacks falls back to the Winamp 2.91 base skin, the way Winamp itself does it.
 - **Bundled skins**: the Winamp 2.91 base skin, Winamp5 Classified v5.5 (from the Winamp Skin Museum), and 7 classic community skins (Green Dimension, Mac OS X Aqua, TopazAmp, Vizor, XMMS Turquoise, Internet Archive, Zaxon). To add more, drop a `.wsz` file *or a link to one* on any window (or paste it with ⌘V): links straight to a `.wsz` and Winamp Skin Museum pages (`skins.webamp.org/skin/…`) are downloaded, checked and installed. Skins › Open Skin… works too.
 - **The llama intro**: the classic "DJ Mike Llama" intro plays on first launch (and from the options menu › Play the Llama Intro). Local files play through their own audio engine with the same EQ, balance and visualizer, so they don't need the audio permission.
 - **Copy-paste SoundCloud links**: press ⌘V on any window, drag a link onto it, or use the eject button / ⌘L. Accepted forms:
@@ -63,7 +63,7 @@ App switches for debugging: `--headless`, `--quit-when settled|finished|handover
 | ⌘= / ⌘- / ⌘0 | zoom in / out / 100% (also pinch on the trackpad; 100–400% in 50% steps) |
 | ⌘D | double size (Winamp's "D") |
 | ⌘T | always on top |
-| ⌥E / ⌥G | playlist / equalizer window |
+| ⌥E / ⌥G / ⌥A | playlist / equalizer / artwork window |
 | ⇧⌘D | debug console |
 | In the playlist | Return plays, Delete removes, ⌘A selects all, ⌘C copies links, drag to reorder |
 
@@ -84,7 +84,7 @@ Sources/SoundAmp/         the app
   CollectionResolver.swift playlist/artist expansion via a silent widget
   WidgetPage/WidgetPlayer SoundCloud widget host + JS bridge
   TapEngine.swift         process tap → aggregate device → real-time DSP (re-attaches on output device change)
-  SkinView, Main/Equalizer/PlaylistWindowView, WindowManager, MenuBuilder, SkinManager, DebugConsole
+  SkinView, Main/Equalizer/Playlist/ArtworkWindowView, WindowManager, MenuBuilder, SkinManager, DebugConsole
 ```
 
 ## Notes

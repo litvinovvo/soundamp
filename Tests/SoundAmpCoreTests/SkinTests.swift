@@ -105,6 +105,25 @@ final class BundledSkinTests: XCTestCase {
         return try Skin(contentsOf: url, fallback: nil)
     }
 
+    func testGenFrame() throws {
+        let skin = try base()
+        XCTAssertTrue(skin.hasGenFrame)
+        for active in [true, false] {
+            let letters = skin.genLetters(active: active)
+            XCTAssertEqual(letters.count, 26)
+            XCTAssertEqual(letters["A"]?.width, 6)
+            XCTAssertEqual(letters["Z"]?.width, 5)
+            XCTAssertEqual(letters["W"]?.body.size.height, 6)
+            XCTAssertNotNil(letters["W"]?.lastRow.flatMap(skin.image), "the base skin stores the 7th row separately")
+        }
+        // Both frames leave a square for the cover.
+        for f in [FrameLayout.gen, .pledit] {
+            let r = f.content(in: f.squareContentSize(height: 232))
+            XCTAssertEqual(r.width, r.height)
+        }
+        XCTAssertEqual(Sprites.plFrameBottomInner.tile.size.height + Sprites.plFrameBottomOuter.tile.size.height, FrameLayout.pledit.bottom)
+    }
+
     func testBaseSkin() throws {
         let skin = try base()
         for sheet in SkinSheet.allCases where sheet != .numsEx {

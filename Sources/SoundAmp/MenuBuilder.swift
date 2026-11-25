@@ -124,6 +124,9 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
         m.addItem(ActionItem("Equalizer", key: "g", modifiers: [.option], checked: Env.windows.equalizer.isVisible) {
             Env.windows.toggle(Env.windows.equalizer)
         })
+        m.addItem(ActionItem("Artwork", key: "a", modifiers: [.option], checked: Env.windows.artwork.isVisible) {
+            Env.windows.toggle(Env.windows.artwork)
+        })
         m.addItem(submenu("Size", sizeMenu()))
         m.addItem(ActionItem("Always On Top", key: "t", checked: Settings.alwaysOnTop) { Env.windows.toggleAlwaysOnTop() })
         m.addItem(ActionItem("Time Remaining", key: "", checked: Settings.timeRemaining) { Settings.timeRemaining.toggle() })
@@ -457,6 +460,9 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
             })
             m.addItem(ActionItem("Equalizer", key: "g", modifiers: [.option], checked: Env.windows.equalizer.isVisible) {
                 Env.windows.toggle(Env.windows.equalizer)
+            })
+            m.addItem(ActionItem("Artwork", key: "a", modifiers: [.option], checked: Env.windows.artwork.isVisible) {
+                Env.windows.toggle(Env.windows.artwork)
             })
             m.addItem(.separator())
             for item in self.sizeMenu().items { item.menu?.removeItem(item); m.addItem(item) }

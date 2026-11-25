@@ -208,6 +208,7 @@ final class PlayerController {
                     if !info.shortTitle.isEmpty { t.title = info.shortTitle }
                     if !info.author.isEmpty { t.artist = info.author }
                     t.soundID = info.id ?? t.soundID
+                    t.artworkURL = t.artworkURL ?? info.thumbnailURL
                 }
             }
         }
@@ -243,6 +244,7 @@ final class PlayerController {
                         if current.title == track.title, !info.shortTitle.isEmpty {
                             current.title = info.shortTitle
                         }
+                        current.artworkURL = current.artworkURL ?? info.thumbnailURL
                         if current.artist.isEmpty, !info.author.isEmpty {
                             current.artist = info.author
                         }

@@ -4,6 +4,8 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>SoundAmp</string>
 	<key>CFBundleExecutable</key>
 	<string>SoundAmp</string>
 	<key>CFBundleIconFile</key>
@@ -14,21 +16,19 @@
 	<string>6.0</string>
 	<key>CFBundleName</key>
 	<string>SoundAmp</string>
-	<key>CFBundleDisplayName</key>
-	<string>SoundAmp</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.0</string>
+	<string>0.1.1</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>2</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.2</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>SoundAmp taps the audio of its own player so the equalizer and visualizer can work. Nothing is recorded or saved.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
-	<key>NSAudioCaptureUsageDescription</key>
-	<string>SoundAmp taps the audio of its own player so the equalizer and visualizer can work. Nothing is recorded or saved.</string>
 </dict>
 </plist>

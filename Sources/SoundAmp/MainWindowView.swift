@@ -11,6 +11,8 @@ final class MainWindowView: SkinView {
     /// While a slider is dragged, Winamp shows its value in the marquee.
     private var sliderMessage: String?
     private var scrubFraction: Double?
+    private var marqueeClick: DispatchWorkItem?
+    private var marqueeDragged = false
     private var marqueeDrag: (start: CGFloat, offset: Int)?
 
     override var skinSize: CGSize { isShaded ? CGSize(width: 275, height: 14) : MainLayout.size }
@@ -229,7 +231,7 @@ final class MainWindowView: SkinView {
                 Env.menus.optionsMenu().popUp(positioning: nil, at: NSPoint(x: 6 * self.scale, y: 12 * self.scale), in: self)
             }),
             Hit(rect: CGRect(origin: MainLayout.minimize, size: CGSize(width: 9, height: 9)), kind: .button("minimize") {
-                Env.windows.all.forEach { $0.miniaturize(nil) }
+                Env.windows.visible.forEach { $0.miniaturize(nil) }
             }),
             Hit(rect: CGRect(origin: MainLayout.shade, size: CGSize(width: 9, height: 9)), kind: .button("shade") { [weak self] in self?.toggleShade() }),
             Hit(rect: CGRect(origin: MainLayout.close, size: CGSize(width: 9, height: 9)), kind: .button("close") { NSApp.terminate(nil) }),
@@ -277,6 +279,8 @@ final class MainWindowView: SkinView {
                 guard let self else { return }
                 switch phase {
                 case .down:
+                    self.marqueeClick?.cancel()
+                    self.marqueeDragged = false
                     if event.clickCount == 2 { // double-click the title → the track's SoundCloud page
                         self.marqueeDrag = nil
                         Env.menus.openOnSoundCloud()
@@ -284,9 +288,19 @@ final class MainWindowView: SkinView {
                     }
                     self.marqueeDrag = (pt.x, self.marqueeOffset)
                 case .dragged:
-                    if let d = self.marqueeDrag { self.marqueeDrag = (d.start, max(0, d.offset + Int((d.start - pt.x) / 5))) }
+                    if let d = self.marqueeDrag {
+                        if abs(d.start - pt.x) >= 3 { self.marqueeDragged = true }
+                        self.marqueeDrag = (d.start, max(0, d.offset + Int((d.start - pt.x) / 5)))
+                    }
                 case .up:
-                    if let d = self.marqueeDrag { self.marqueeOffset = d.offset }
+                    if let d = self.marqueeDrag {
+                        self.marqueeOffset = d.offset
+                        if !self.marqueeDragged {
+                            let click = DispatchWorkItem { Env.windows.toggle(Env.windows.artwork) }
+                            self.marqueeClick = click
+                            DispatchQueue.main.asyncAfter(deadline: .now() + NSEvent.doubleClickInterval, execute: click)
+                        }
+                    }
                     self.marqueeDrag = nil
                 }
             })

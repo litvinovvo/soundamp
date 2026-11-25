@@ -5,7 +5,7 @@ import CoreGraphics
 
 public enum SkinSheet: String, CaseIterable {
     case main, cbuttons, titlebar, shufrep, posbar, volume, balance, monoster, playpaus
-    case numbers, numsEx = "nums_ex", text, eqmain, eqEx = "eq_ex", pledit
+    case numbers, numsEx = "nums_ex", text, eqmain, eqEx = "eq_ex", pledit, gen
 }
 
 public struct Sprite: Hashable {
@@ -123,6 +123,8 @@ public enum Sprites {
     public static let plTopTileActive = Sprite(.pledit, 127, 0, 25, 20)
     public static let plTopRightActive = Sprite(.pledit, 153, 0, 25, 20)
     public static let plLeftTile = Sprite(.pledit, 0, 42, 12, 29)
+    /// The part of the title bar behind the title text.
+    public static let plTitleBackground = Sprite(.pledit, 127, 24, 25, 8)
     public static let plRightTile = Sprite(.pledit, 31, 42, 20, 29)
     public static let plBottomTile = Sprite(.pledit, 179, 0, 25, 38)
     public static let plBottomLeft = Sprite(.pledit, 0, 72, 125, 38)
@@ -131,6 +133,26 @@ public enum Sprites {
     public static let plScrollHandle = Sprite(.pledit, 52, 53, 8, 18)
     public static let plScrollHandlePressed = Sprite(.pledit, 61, 53, 8, 18)
     public static let plClosePressed = Sprite(.pledit, 52, 42, 9, 9)
+
+    // GEN: the frame Winamp gives extra windows (media library, video…).
+    // Two title-bar states (active at y 0, inactive at y 21), six 25×20 pieces each.
+    public static func genTop(_ piece: GenTopPiece, active: Bool) -> Sprite { Sprite(.gen, piece.rawValue * 26, active ? 0 : 21, 25, 20) }
+    public static let genBottomLeft = Sprite(.gen, 0, 42, 125, 14)
+    public static let genBottomRight = Sprite(.gen, 0, 57, 125, 14)
+    public static let genBottomTile = Sprite(.gen, 127, 72, 25, 14)
+    public static let genLeftTile = Sprite(.gen, 127, 42, 11, 29)
+    public static let genRightTile = Sprite(.gen, 139, 42, 8, 29)
+    public static let genLeftBottom = Sprite(.gen, 158, 42, 11, 24)
+    public static let genRightBottom = Sprite(.gen, 170, 42, 8, 24)
+    public static let genClosePressed = Sprite(.gen, 148, 42, 9, 9)
+
+    // A slim frame cut from PLEDIT, for skins without gen.bmp: no scrollbar, no footer.
+    // The right border is the left one mirrored. The bottom edge keeps only the footer's
+    // inner edge (3 rows) and outer edge (8 rows), which are clear of its buttons.
+    public static let plFrameLeftJoin = Sprite(.pledit, 0, 35, 12, 6)
+    public static let plFrameLeftJoinActive = Sprite(.pledit, 0, 14, 12, 6)
+    public static let plFrameBottomInner = (corner: Sprite(.pledit, 0, 72, 12, 3), tile: Sprite(.pledit, 179, 0, 25, 3))
+    public static let plFrameBottomOuter = (corner: Sprite(.pledit, 0, 102, 12, 8), tile: Sprite(.pledit, 179, 30, 25, 8))
 
     // TEXT: 5×6 glyphs, 31 per row
     public static func character(_ c: Character) -> Sprite {
@@ -152,6 +174,33 @@ public enum Sprites {
         t["å"] = (2, 0); t["ö"] = (2, 1); t["ä"] = (2, 2); t["?"] = (2, 3); t["*"] = (2, 4)
         return t
     }()
+}
+
+/// A gen.bmp title letter, drawn as `body` with `lastRow` (if separate) right below.
+public struct GenLetter {
+    public let body: Sprite
+    public let lastRow: Sprite?
+    public var width: CGFloat { body.size.width }
+}
+
+public enum GenTopPiece: Int {
+    case left, leftEnd, titleFill, rightEnd, fill, right
+}
+
+/// Border widths of a framed window.
+public struct FrameLayout {
+    public let top, left, bottom, right: CGFloat
+    public static let gen = FrameLayout(top: 20, left: 11, bottom: 14, right: 8)
+    public static let pledit = FrameLayout(top: 20, left: 12, bottom: 11, right: 12)
+
+    /// The window size of this height whose content area is square.
+    public func squareContentSize(height: CGFloat) -> CGSize {
+        CGSize(width: height - top - bottom + left + right, height: height)
+    }
+
+    public func content(in size: CGSize) -> CGRect {
+        CGRect(x: left, y: top, width: size.width - left - right, height: size.height - top - bottom)
+    }
 }
 
 /// Where things go on the 275×116 main window.

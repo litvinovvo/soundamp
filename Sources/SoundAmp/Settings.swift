@@ -65,6 +65,15 @@ enum Settings {
         get { d.object(forKey: "showPlaylist") as? Bool ?? true }
         set { d.set(newValue, forKey: "showPlaylist") }
     }
+    static var showArtwork: Bool {
+        get { d.bool(forKey: "showArtwork") }
+        set { d.set(newValue, forKey: "showArtwork") }
+    }
+    /// Artwork window height in skin pixels; by default as tall as main + equalizer.
+    static var artworkHeight: Double {
+        get { d.object(forKey: "artworkHeight") as? Double ?? 232 }
+        set { d.set(newValue, forKey: "artworkHeight") }
+    }
     static var timeRemaining: Bool {
         get { d.bool(forKey: "timeRemaining") }
         set { d.set(newValue, forKey: "timeRemaining") }

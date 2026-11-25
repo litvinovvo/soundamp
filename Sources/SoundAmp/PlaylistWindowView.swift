@@ -211,7 +211,7 @@ final class PlaylistWindowView: SkinView {
             if new != segments {
                 segments = new
                 Settings.playlistSegments = new
-                Env.windows.playlistResized()
+                Env.windows.resized(Env.windows.playlist)
             }
         case .up:
             resizeStart = nil
