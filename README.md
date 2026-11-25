@@ -8,6 +8,7 @@ A native macOS SoundCloud player that wears classic Winamp 2.x skins.
 - **Copy-paste SoundCloud links**: press ⌘V on any window, drag a link onto it, or use the eject button / ⌘L. Accepted forms:
   - tracks, including ones copied with `?si=…&utm_…` tracking parameters or from inside a playlist (`?in=…`)
   - playlists and albums (`/sets/…`)
+  - public Daily Drops share links, full or shortened
   - private links (`/s-…` secret tokens)
   - artist pages and likes pages
   - `on.soundcloud.com` short links from the mobile share sheet

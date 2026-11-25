@@ -118,6 +118,55 @@ public struct LinkResolver {
         return try OEmbedInfo.parse(data)
     }
 
+    private struct HydrationEntry: Decodable {
+        let hydratable: String
+        let data: PlaylistData?
+
+        struct PlaylistData: Decodable {
+            let tracks: [TrackData]
+
+            struct TrackData: Decodable {
+                let id: Int
+                let policy: String?
+            }
+        }
+
+        init(from decoder: Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            hydratable = try values.decode(String.self, forKey: .hydratable)
+            data = hydratable == "systemPlaylist" ? try values.decode(PlaylistData.self, forKey: .data) : nil
+        }
+
+        private enum CodingKeys: String, CodingKey { case hydratable, data }
+    }
+
+    public func dailyDropsTracks(user: String) async throws -> [Track] {
+        let link = SoundCloudLink.dailyDrops(user: user)
+        guard let url = URL(string: link.canonicalURL) else {
+            throw ResolveError.notSoundCloud(link.canonicalURL)
+        }
+        let (data, _, status) = try await http.get(url)
+        guard status == 200 else { throw ResolveError.badResponse("Daily Drops HTTP \(status)") }
+
+        let html = String(decoding: data, as: UTF8.self)
+        guard let assignment = html.range(of: "window.__sc_hydration = "),
+              let end = html.range(of: "</script>", range: assignment.upperBound..<html.endIndex) else {
+            throw ResolveError.badResponse("Daily Drops track list missing")
+        }
+        let json = html[assignment.upperBound..<end.lowerBound]
+            .trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: ";")))
+        let entries = try JSONDecoder().decode([HydrationEntry].self, from: Data(json.utf8))
+        guard let tracks = entries.compactMap(\.data).first?.tracks, !tracks.isEmpty else {
+            throw ResolveError.badResponse("Daily Drops track list is empty")
+        }
+        return tracks.map { track in
+            let link = SoundCloudLink.apiTrack(id: track.id)
+            return Track(url: link.canonicalURL, title: link.placeholderTitle, soundID: track.id,
+                         status: track.policy == "BLOCK" ? .unavailable : .ready,
+                         note: track.policy == "BLOCK" ? "blocked" : track.policy == "SNIP" ? "preview" : nil)
+        }
+    }
+
     private func isShort(_ l: SoundCloudLink) -> Bool {
         if case .shortLink = l { return true }
         return false

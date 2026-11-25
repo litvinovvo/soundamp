@@ -16,13 +16,14 @@ public enum SoundCloudLink: Hashable, CustomStringConvertible {
     case userTracks(user: String)
     /// soundcloud.com/{user}/likes
     case userLikes(user: String)
+    case dailyDrops(user: String)
     /// on.soundcloud.com/xyz, snd.sc/xyz, soundcloud.app.goo.gl/xyz — must be resolved over HTTP.
     case shortLink(URL)
 
     /// True for links that expand into several tracks.
     public var isCollection: Bool {
         switch self {
-        case .playlist, .apiPlaylist, .userTracks, .userLikes: return true
+        case .playlist, .apiPlaylist, .userTracks, .userLikes, .dailyDrops: return true
         case .track, .apiTrack, .shortLink: return false
         }
     }
@@ -38,6 +39,7 @@ public enum SoundCloudLink: Hashable, CustomStringConvertible {
         case let .apiPlaylist(id): return "https://api.soundcloud.com/playlists/\(id)"
         case let .userTracks(user): return "https://soundcloud.com/\(user)"
         case let .userLikes(user): return "https://soundcloud.com/\(user)/likes"
+        case let .dailyDrops(user): return "https://soundcloud.com/discover/sets/new-for-you::\(user)"
         case let .shortLink(url): return url.absoluteString
         }
     }
@@ -52,6 +54,7 @@ public enum SoundCloudLink: Hashable, CustomStringConvertible {
         case let .apiPlaylist(id): return "Playlist \(id)"
         case let .userTracks(user): return "\(user) — tracks"
         case let .userLikes(user): return "\(user) — likes"
+        case .dailyDrops: return "Daily Drops"
         case let .shortLink(url): return url.absoluteString
         }
     }
@@ -142,6 +145,11 @@ public enum SoundCloudLink: Hashable, CustomStringConvertible {
     }
 
     private static func parseWebPath(_ segments: [String], secretQuery: String?) -> SoundCloudLink? {
+        if segments.count == 3, segments[0] == "discover", segments[1] == "sets",
+           segments[2].hasPrefix("new-for-you::") {
+            let user = String(segments[2].dropFirst("new-for-you::".count)).lowercased()
+            return isSlug(user) ? .dailyDrops(user: user) : nil
+        }
         guard let first = segments.first else { return nil }
         let user = first.lowercased()
         guard !reservedRoots.contains(user), isSlug(user) else { return nil }

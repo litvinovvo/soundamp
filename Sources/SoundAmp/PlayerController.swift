@@ -9,6 +9,9 @@ final class PlayerController {
 
     typealias State = PlaybackState
 
+    var nowPlaying: NowPlaying?
+    var nowPlayingRate: Double { state == .playing ? activeEffects.speed : 0 }
+
     let playlist: Playlist
     let player = WidgetPlayer(name: "player")
     let resolver = CollectionResolver()
@@ -168,6 +171,21 @@ final class PlayerController {
             return
         }
 
+        if case let .dailyDrops(user) = link {
+            Task { @MainActor in
+                do {
+                    let tracks = try await linkResolver.dailyDropsTracks(user: user)
+                    playlist.replace(id, with: tracks)
+                    flash("ADDED \(tracks.count) TRACKS")
+                    autoplayPendingIfNeeded()
+                    await loadDailyDropsMetadata(for: tracks)
+                } catch {
+                    markFailed(id, "couldn't load Daily Drops: \(error)")
+                }
+            }
+            return
+        }
+
         if link.isCollection {
             resolver.resolve(link) { [weak self] result in
                 guard let self else { return }
@@ -208,6 +226,32 @@ final class PlayerController {
         }
     }
 
+    private func loadDailyDropsMetadata(for tracks: [Track]) async {
+        let tracks = tracks.filter(\.isPlayable)
+        let linkResolver = self.linkResolver
+        for start in stride(from: 0, to: tracks.count, by: 4) {
+            await withTaskGroup(of: (Track, OEmbedInfo?).self) { group in
+                for track in tracks[start..<min(start + 4, tracks.count)] {
+                    guard let id = track.soundID else { continue }
+                    group.addTask {
+                        (track, try? await linkResolver.oEmbed(.apiTrack(id: id)))
+                    }
+                }
+                for await (track, info) in group {
+                    guard let info else { continue }
+                    playlist.update(track.id) { current in
+                        if current.title == track.title, !info.shortTitle.isEmpty {
+                            current.title = info.shortTitle
+                        }
+                        if current.artist.isEmpty, !info.author.isEmpty {
+                            current.artist = info.author
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private func autoplayPendingIfNeeded() {
         guard let from = pendingAutoplayFrom, state == .stopped else { return }
         if let i = (min(from, playlist.count)..<playlist.count).first(where: { playlist[$0].isPlayable }) {
@@ -218,6 +262,7 @@ final class PlayerController {
 
     private func markFailed(_ id: UUID, _ why: String) {
         playlist.update(id) { t in
+            if t.isPlaceholder, let link = SoundCloudLink.parse(t.url) { t.title = link.placeholderTitle }
             t.isPlaceholder = false
             t.status = .unavailable
             t.note = why
@@ -319,6 +364,7 @@ final class PlayerController {
         guard durationMs > 0, state != .stopped else { return }
         positionMs = max(0, min(1, fraction)) * durationMs
         if currentIsLocal { local.seek(toMilliseconds: positionMs) } else { player.seek(toMilliseconds: positionMs) }
+        nowPlaying?.update(from: self, forcePosition: true)
         changed()
     }
 
@@ -523,6 +569,7 @@ final class PlayerController {
             progressLog.append((Date(), positionMs))
             if progressLog.count > 200 { progressLog.removeFirst(100) }
             apply(machine.handle(.progress))
+            nowPlaying?.update(from: self)
         case "error":
             Log("⚠️ Player widget error: \(body["detail"] ?? "?")")
             apply(machine.handle(.error))
@@ -609,6 +656,7 @@ final class PlayerController {
             MainActor.assumeIsolated {
                 guard let self, self.currentIsLocal, self.state == .playing else { return }
                 self.positionMs = self.local.positionMs
+                self.nowPlaying?.update(from: self)
             }
         }
     }
@@ -827,6 +875,7 @@ final class PlayerController {
     // MARK: Plumbing
 
     func shutdown() {
+        nowPlaying?.shutdown()
         tap.detach()
         PlaylistStore.save(playlist.tracks)
     }
@@ -856,6 +905,7 @@ final class PlayerController {
     func notifyChanged() { changed() }
 
     private func changed() {
+        nowPlaying?.update(from: self)
         NotificationCenter.default.post(name: Self.didChange, object: self)
     }
 }

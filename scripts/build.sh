@@ -4,6 +4,7 @@
 # the bundle's Info.plist (NSAudioCaptureUsageDescription) and signature.
 #
 # Usage: scripts/build.sh [debug|release]   (default: release)
+# Set CODESIGN_IDENTITY to use a certificate from Keychain.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -23,9 +24,8 @@ mkdir -p "$APP/Contents/Resources/Skins"
 cp Skins/*.wsz "$APP/Contents/Resources/Skins/"
 if [[ -s Media/llama-intro.mp3 ]]; then cp Media/llama-intro.mp3 "$APP/Contents/Resources/llama-intro.mp3"; fi
 
-# Ad-hoc signature. Note: the signature changes on every build, so macOS may
-# ask for the audio-capture permission again after rebuilding.
-codesign --force --sign - --timestamp=none "$APP"
+# Ad-hoc signing remains the default for local development.
+codesign --force --sign "${CODESIGN_IDENTITY:--}" --timestamp=none "$APP"
 
 echo "Built $APP"
 echo "Run:  open $APP            (log: ~/Library/Logs/SoundAmp.log)"

@@ -175,6 +175,29 @@ final class LinkResolverTests: XCTestCase {
         XCTAssertEqual(link, .playlist(user: "forss", slug: "soulhack", secret: nil))
     }
 
+    func testDailyDropsFullAndShortLinksImportTracksInOrder() async throws {
+        let http = MockHTTP()
+        let full = try XCTUnwrap(URL(string: "https://soundcloud.com/discover/sets/new-for-you::listener?si=share"))
+        let short = try XCTUnwrap(URL(string: "https://on.soundcloud.com/DailyDrops"))
+        http.routes[short.absoluteString] = (Data(), full, 200)
+        let html = """
+        <script>window.__sc_hydration = [
+          {"hydratable":"anonymousId","data":"example"},
+          {"hydratable":"systemPlaylist","data":{"tracks":[{"id":42},{"id":18,"policy":"BLOCK"}]}}
+        ];</script>
+        """
+        http.routes["/discover/sets/"] = (Data(html.utf8), nil, 200)
+        let resolver = LinkResolver(http: http)
+        let direct = try XCTUnwrap(PasteParser.links(in: full.absoluteString).first)
+        let redirected = try await resolver.normalize(.shortLink(short))
+        XCTAssertEqual(direct, .dailyDrops(user: "listener"))
+        XCTAssertEqual(redirected, direct)
+
+        let tracks = try await resolver.dailyDropsTracks(user: "listener")
+        XCTAssertEqual(tracks.map(\.soundID), [42, 18])
+        XCTAssertEqual(tracks.map(\.isPlayable), [true, false])
+    }
+
     func testShortLinkToSomethingElseFails() async {
         let http = MockHTTP()
         http.routes["on.soundcloud.com/bad"] = (Data(), URL(string: "https://example.com/")!, 200)

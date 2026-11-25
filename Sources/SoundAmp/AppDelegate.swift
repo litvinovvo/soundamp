@@ -14,6 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Command-line switches apply to this run only — never saved as settings.
         if let s = options.skin, !Env.skins.select(named: s, persist: false) { Log("Unknown skin \(s)") }
         Env.player = PlayerController()
+        if !options.headless { Env.player.nowPlaying = NowPlaying(player: Env.player) }
         if let v = options.volume { Env.player.setVolume(v, persist: false) }
         if !options.autoAttachTap { Env.player.tapDisabledForSession = true }
         if options.headless { Env.player.setVolume(0, persist: false) }
