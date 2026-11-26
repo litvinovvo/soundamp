@@ -6,6 +6,7 @@ import SoundAmpCore
 @MainActor
 final class PlayerController {
     static let didChange = Notification.Name("SoundAmpPlayerDidChange")
+    static let positionDidChange = Notification.Name("SoundAmpPositionDidChange")
 
     typealias State = PlaybackState
 
@@ -72,7 +73,10 @@ final class PlayerController {
     private var loadGeneration = 0
     private var playActivity: NSObjectProtocol?
     private var attachGeneration = 0
+    private var tapIdleWork: DispatchWorkItem?
+    private var tapSignalVerified = false
     private var lastRingIndex = -1
+    private var stagnantRingFrames = 0
     private var visSamples = [Float](repeating: 0, count: ClassicVisualizer.samplesNeeded)
     private var saveScheduled = false
 
@@ -81,6 +85,7 @@ final class PlayerController {
         playlist.shuffle = Settings.shuffle
         playlist.repeatAll = Settings.repeatAll
         playlist.onChange = { [weak self] in self?.playlistChanged() }
+        visualizer.frameRate = 30
         Settings.loadVisualizer(visualizer)
 
         // Every effects chain (tap, local player) gets the current EQ + effects.
@@ -290,6 +295,7 @@ final class PlayerController {
         Log("▶︎ Loading \(index + 1). \(track.displayTitle) — \(track.url)")
         if let file = localFile(for: track) {
             player.pause()
+            scheduleTapSuspend(immediately: true)
             currentIsLocal = true
             do {
                 try local.load(file)
@@ -306,6 +312,7 @@ final class PlayerController {
             return
         }
         if currentIsLocal { local.stop(); stopLocalTimer(); currentIsLocal = false }
+        resumeTapIfNeeded()
         player.load(track.url, autoPlay: true, token: gen)
         changed()
         // Watchdog: a track that never starts is skipped.
@@ -320,7 +327,7 @@ final class PlayerController {
     func playButton() {
         switch state {
         case .paused:
-            if currentIsLocal { local.play() } else { player.play() }
+            if currentIsLocal { local.play() } else { resumeTapIfNeeded(); player.play() }
         case .playing, .loading:
             if let i = playlist.currentIndex { play(index: i) }
         case .stopped:
@@ -331,7 +338,7 @@ final class PlayerController {
     func pauseButton() {
         switch state {
         case .playing: if currentIsLocal { local.pause() } else { player.pause() }
-        case .paused: if currentIsLocal { local.play() } else { player.play() }
+        case .paused: if currentIsLocal { local.play() } else { resumeTapIfNeeded(); player.play() }
         default: break
         }
     }
@@ -350,6 +357,7 @@ final class PlayerController {
         _ = machine.handle(.stop)
         positionMs = 0
         endActivity()
+        scheduleTapSuspend()
         changed()
     }
 
@@ -496,17 +504,29 @@ final class PlayerController {
 
     // MARK: Visualizer
 
-    /// Called ~60×/s by the main window.
-    func renderVisualizer() {
+    /// Called up to 60×/s by the main window while the visualizer is animating.
+    /// Returns true if the visualizer frame changed.
+    @discardableResult
+    func renderVisualizer() -> Bool {
         let source = currentIsLocal ? local.ring : ring
         let w = source.writeIndex
         if w != lastRingIndex, state == .playing {
+            stagnantRingFrames = 0
+            lastRingIndex = w
             visSamples.withUnsafeMutableBufferPointer { source.read(latest: $0.count, into: $0.baseAddress!) }
+            return visualizer.render(samples: visSamples)
+        }
+        if state == .playing {
+            // Audio buffers can arrive slightly slower than the visualizer cadence;
+            // skip redrawing briefly until new samples arrive instead of flickering to silence.
+            stagnantRingFrames += 1
+            if stagnantRingFrames < 2 { return false }
         } else {
-            for i in visSamples.indices { visSamples[i] = 0 }
+            stagnantRingFrames = 0
         }
         lastRingIndex = w
-        visualizer.render(samples: visSamples)
+        for i in visSamples.indices { visSamples[i] = 0 }
+        return visualizer.render(samples: visSamples)
     }
 
     func visualizerChanged() {
@@ -572,6 +592,7 @@ final class PlayerController {
             if progressLog.count > 200 { progressLog.removeFirst(100) }
             apply(machine.handle(.progress))
             nowPlaying?.update(from: self)
+            NotificationCenter.default.post(name: Self.positionDidChange, object: self)
         case "error":
             Log("⚠️ Player widget error: \(body["detail"] ?? "?")")
             apply(machine.handle(.error))
@@ -597,7 +618,15 @@ final class PlayerController {
             break
         case .started:
             beginActivity()
-            autoAttachOnPlay()
+            if currentIsLocal {
+                startLocalTimer()
+            } else {
+                resumeTapIfNeeded()
+                autoAttachOnPlay()
+                if tap.isAttached, !tapSignalVerified {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in self?.checkTapSignal() }
+                }
+            }
             if let ms = pendingStartAtMs, !currentIsLocal {
                 pendingStartAtMs = nil
                 Log("Seeking to \(formatTime(ms)) (--start-at)")
@@ -605,7 +634,9 @@ final class PlayerController {
             }
             changed()
         case .paused:
+            if currentIsLocal { stopLocalTimer() }
             endActivity()
+            scheduleTapSuspend()
             changed()
         case .pauseWidget:
             player.pause() // e.g. clicked inside the debug widget view while stopped
@@ -659,6 +690,7 @@ final class PlayerController {
                 guard let self, self.currentIsLocal, self.state == .playing else { return }
                 self.positionMs = self.local.positionMs
                 self.nowPlaying?.update(from: self)
+                NotificationCenter.default.post(name: Self.positionDidChange, object: self)
             }
         }
     }
@@ -796,17 +828,62 @@ final class PlayerController {
     }
 
     func attachTap() {
+        cancelTapSuspend()
+        tapSignalVerified = false
         attachGeneration += 1
         tryAttach(attempt: 0, generation: attachGeneration)
     }
 
     func detachTap() {
+        cancelTapSuspend()
+        tapSignalVerified = false
         attachGeneration += 1
         tap.detach()
         updateSpeedRouting()
         tapStatus = "off"
         Log("Tap detached")
         changed()
+    }
+
+    private func cancelTapSuspend() {
+        tapIdleWork?.cancel()
+        tapIdleWork = nil
+    }
+
+    /// Stop the tap's HAL IOProc after a short idle grace period (longer when reverb
+    /// is enabled so tails ring out), matching LocalPlayer's idle shutdown.
+    private func scheduleTapSuspend(immediately: Bool = false) {
+        cancelTapSuspend()
+        guard tap.isAttached, tap.isRunning else { return }
+        if immediately {
+            tap.suspend()
+            Log("Tap suspended (local playback)")
+            return
+        }
+        let delay: Double = activeEffects.reverbOn ? 8.0 : 1.5
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.tapIdleWork = nil
+            guard self.tap.isAttached, self.tap.isRunning,
+                  self.state != .playing || self.currentIsLocal else { return }
+            self.tap.suspend()
+            Log("Tap suspended while idle")
+        }
+        tapIdleWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func resumeTapIfNeeded() {
+        cancelTapSuspend()
+        guard tap.isAttached, !tap.isRunning else { return }
+        if tap.resume() {
+            Log("Tap resumed")
+        } else {
+            Log("⚠️ Tap resume failed — detaching and re-attaching")
+            tap.detach()
+            updateSpeedRouting()
+            attachTap()
+        }
     }
 
     private func tryAttach(attempt: Int, generation: Int) {
@@ -846,9 +923,9 @@ final class PlayerController {
     /// Silence while playing = no permission. With mutedWhenTapped that means the
     /// user hears nothing, so detach and let the original audio through.
     private func checkTapSignal() {
-        guard tap.isAttached else { return }
+        guard tap.isAttached, tap.isRunning, !currentIsLocal, state == .playing else { return }
         let peak = ring.takePeak()
-        if state == .playing && peak == 0 && positionMs > 2000 {
+        if peak == 0 && positionMs > 2000 {
             // Detach first so the original (muted) audio comes back right away.
             tap.detach()
             updateSpeedRouting()
@@ -868,6 +945,7 @@ final class PlayerController {
                 showPermissionAlert("equalizer and visualizer")
             }
         } else if peak > 0 {
+            tapSignalVerified = true
             Log("✅ Tap receives audio (peak \(String(format: "%.3f", peak)))")
         } else {
             DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in self?.checkTapSignal() }
@@ -877,6 +955,7 @@ final class PlayerController {
     // MARK: Plumbing
 
     func shutdown() {
+        cancelTapSuspend()
         nowPlaying?.shutdown()
         tap.detach()
         PlaylistStore.save(playlist.tracks)

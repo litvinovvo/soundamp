@@ -20,6 +20,8 @@ final class TapEngine {
     let ring: SampleRing
 
     private(set) var isAttached = false
+    /// True while the aggregate device IOProc is actively pulling audio.
+    private(set) var isRunning = false
     private(set) var sampleRate: Double = 48_000
     private(set) var summary = ""
     /// Called on the main queue after an automatic re-attach (output device changed).
@@ -51,7 +53,7 @@ final class TapEngine {
         mono.deallocate()
     }
 
-    func attach(to processes: [AudioProcess]) throws {
+    func attach(to processes: [AudioProcess], startImmediately: Bool = true) throws {
         teardown()
         guard !processes.isEmpty else { throw CAError(0, "no processes to tap") }
 
@@ -109,8 +111,11 @@ final class TapEngine {
             guard err == noErr, let procID else { throw CAError(err, "AudioDeviceCreateIOProcIDWithBlock") }
             ioProcID = procID
 
-            err = AudioDeviceStart(agg, procID)
-            guard err == noErr else { throw CAError(err, "AudioDeviceStart") }
+            if startImmediately {
+                err = AudioDeviceStart(agg, procID)
+                guard err == noErr else { throw CAError(err, "AudioDeviceStart") }
+                isRunning = true
+            }
 
             isAttached = true
             tappedProcesses = processes
@@ -122,6 +127,35 @@ final class TapEngine {
         }
     }
 
+    /// Stop the HAL IOProc while idle/paused so CoreAudio and the DSP chain use 0% CPU.
+    func suspend() {
+        guard isAttached, isRunning, let procID = ioProcID, aggregateID != kAudioObjectUnknown else { return }
+        AudioDeviceStop(aggregateID, procID)
+        isRunning = false
+        effects?.reset()
+    }
+
+    /// Restart the HAL IOProc when playback resumes. Re-attaches if the device went stale.
+    @discardableResult
+    func resume() -> Bool {
+        guard isAttached else { return false }
+        if isRunning { return true }
+        guard let procID = ioProcID, aggregateID != kAudioObjectUnknown else { return false }
+        let err = AudioDeviceStart(aggregateID, procID)
+        if err == noErr {
+            isRunning = true
+            return true
+        }
+        let procs = tappedProcesses
+        guard !procs.isEmpty else { return false }
+        do {
+            try attach(to: procs, startImmediately: true)
+            return true
+        } catch {
+            return false
+        }
+    }
+
     func detach() {
         stopDeviceListener()
         tappedProcesses = []
@@ -130,10 +164,11 @@ final class TapEngine {
 
     private func teardown() {
         if let procID = ioProcID {
-            AudioDeviceStop(aggregateID, procID)
+            if isRunning { AudioDeviceStop(aggregateID, procID) }
             AudioDeviceDestroyIOProcID(aggregateID, procID)
         }
         ioProcID = nil
+        isRunning = false
         if aggregateID != kAudioObjectUnknown { AudioHardwareDestroyAggregateDevice(aggregateID) }
         aggregateID = AudioObjectID(kAudioObjectUnknown)
         if tapID != kAudioObjectUnknown { AudioHardwareDestroyProcessTap(tapID) }
@@ -151,8 +186,9 @@ final class TapEngine {
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             guard let self, self.isAttached else { return }
             let procs = self.tappedProcesses
+            let wasRunning = self.isRunning
             do {
-                try self.attach(to: procs)
+                try self.attach(to: procs, startImmediately: wasRunning)
                 self.onReattach?(.success(()))
             } catch {
                 self.onReattach?(.failure(error))

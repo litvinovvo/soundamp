@@ -1,43 +1,430 @@
 import AppKit
+import CoreVideo
+import IOSurface
+import QuartzCore
 import SoundAmpCore
 
 /// The classic 275×116 Winamp main window.
 final class MainWindowView: SkinView {
+    private enum Cadence: Equatable {
+        case off
+        case hz1   // paused time blink (1 Hz)
+        case hz5   // marquee scroll (5 Hz, 200 ms/char)
+        case hz30  // active visualizer / falloff (30 Hz, classic Winamp feel)
+
+        var interval: TimeInterval {
+            switch self {
+            case .off: return 0
+            case .hz1: return 1.0
+            case .hz5: return 0.2
+            case .hz30: return 1.0 / 30
+            }
+        }
+
+        var tolerance: TimeInterval {
+            switch self {
+            case .off: return 0
+            case .hz1: return 0.15
+            case .hz5: return 0.04
+            case .hz30: return 0.005
+            }
+        }
+    }
+
     private(set) var isShaded = false
     private var timer: Timer?
+    private var cadence: Cadence = .off
     private var marqueeOffset = 0
-    private var marqueeTick = 0
-    private var blinkTick = 0
+    private var lastMarqueeAdvance = CACurrentMediaTime()
+    private var blinkHidden = false
+    private var lastBlinkToggle = CACurrentMediaTime()
+    private var lastDisplayedSecond = -1
+    private var lastDisplayedNeg = false
+    private var lastTimeSkin: ObjectIdentifier?
+    private var lastThumbX = -1
+    private var lastThumbPressed = false
+    private var lastThumbSkin: ObjectIdentifier?
+    private var lastMarqueeText = ""
+    private var lastMarqueeSkin: ObjectIdentifier?
+    private var cachedMarqueeScroll = false
+    private var windowObservers: [NSObjectProtocol] = []
+    private static let layerColorSpace = CGColorSpaceCreateDeviceRGB()
+    private static let layerActions: [String: CAAction] = [
+        "contents": NSNull(),
+        "bounds": NSNull(),
+        "position": NSNull(),
+        "frame": NSNull(),
+        "hidden": NSNull(),
+    ]
+    private static func makePixelLayer(opaque: Bool = false) -> CALayer {
+        let l = CALayer()
+        l.isOpaque = opaque
+        l.magnificationFilter = .nearest
+        l.minificationFilter = .nearest
+        l.contentsScale = 1
+        l.actions = layerActions
+        return l
+    }
+    /// Dedicated GPU layers for the 4 animated regions (visualizer, marquee, time,
+    /// seek thumb) so playback and idle animations never trigger full-window redraws.
+    private let visLayer = MainWindowView.makePixelLayer(opaque: true)
+    private let marqueeLayer = MainWindowView.makePixelLayer()
+    private let timeLayer = MainWindowView.makePixelLayer()
+    private let positionThumbLayer = MainWindowView.makePixelLayer()
+    private let visSurfaces: [IOSurfaceRef] = (0..<2).compactMap { _ in
+        let w = ClassicVisualizer.width, h = ClassicVisualizer.height
+        let bpr = IOSurfaceAlignProperty(kIOSurfaceBytesPerRow, w * 4)
+        let props: [IOSurfacePropertyKey: Any] = [
+            .width: w,
+            .height: h,
+            .bytesPerElement: 4,
+            .bytesPerRow: bpr,
+            .allocSize: bpr * h,
+            .pixelFormat: kCVPixelFormatType_32BGRA,
+        ]
+        return IOSurfaceCreate(props as CFDictionary)
+    }
+    private var visSurfaceIndex = 0
     /// While a slider is dragged, Winamp shows its value in the marquee.
-    private var sliderMessage: String?
-    private var scrubFraction: Double?
+    private var sliderMessage: String? {
+        didSet {
+            refreshMarqueeScroll()
+            syncMarqueeLayer()
+        }
+    }
+    private var scrubFraction: Double? {
+        didSet {
+            syncTimeLayer(force: false)
+            syncPositionThumbLayer(force: false)
+        }
+    }
     private var marqueeClick: DispatchWorkItem?
     private var marqueeDragged = false
-    private var marqueeDrag: (start: CGFloat, offset: Int)?
+    private var marqueeDrag: (start: CGFloat, offset: Int)? {
+        didSet {
+            refreshMarqueeScroll()
+            syncMarqueeLayer()
+        }
+    }
 
     override var skinSize: CGSize { isShaded ? CGSize(width: 275, height: 14) : MainLayout.size }
+    override var scale: CGFloat { didSet { syncAllLayers(force: false) } }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
-        timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.tick() }
-        }
-        RunLoop.main.add(timer!, forMode: .common)
+        wantsLayer = true
+        let nc = NotificationCenter.default
+        nc.addObserver(self, selector: #selector(positionChanged), name: PlayerController.positionDidChange, object: nil)
+        nc.addObserver(self, selector: #selector(visibilityChanged), name: NSApplication.didHideNotification, object: nil)
+        nc.addObserver(self, selector: #selector(visibilityChanged), name: NSApplication.didUnhideNotification, object: nil)
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
+    deinit {
+        timer?.invalidate()
+        for o in windowObservers { NotificationCenter.default.removeObserver(o) }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        let nc = NotificationCenter.default
+        for o in windowObservers { nc.removeObserver(o) }
+        windowObservers.removeAll()
+        if let w = window {
+            for name in [NSWindow.didChangeOcclusionStateNotification,
+                         NSWindow.didMiniaturizeNotification,
+                         NSWindow.didDeminiaturizeNotification,
+                         NSWindow.didBecomeKeyNotification] {
+                windowObservers.append(nc.addObserver(forName: name, object: w, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.visibilityChanged() }
+                })
+            }
+        }
+        refreshMarqueeScroll()
+        syncAllLayers(force: true)
+        updateAnimationTimer()
+    }
+
+    override func redraw() {
+        super.redraw()
+        if player.state != .paused {
+            blinkHidden = false
+            lastBlinkToggle = CACurrentMediaTime()
+        }
+        refreshMarqueeScroll()
+        syncAllLayers(force: true)
+        updateAnimationTimer()
+    }
+
+    @objc private func visibilityChanged() {
+        refreshMarqueeScroll()
+        syncAllLayers(force: false)
+        updateAnimationTimer()
+        if isWindowVisibleOnScreen { needsDisplay = true }
+    }
+
+    @objc private func positionChanged() {
+        guard isWindowVisibleOnScreen else { return }
+        if isShaded {
+            let sec = Int(displayedTime().ms / 1000)
+            if sec != lastDisplayedSecond { needsDisplay = true }
+            return
+        }
+        syncTimeLayer(force: false)
+        syncPositionThumbLayer(force: false)
+    }
+
+    private func ensureLayersAttached() {
+        guard let root = layer else { return }
+        for l in [visLayer, marqueeLayer, timeLayer, positionThumbLayer] where l.superlayer !== root {
+            root.addSublayer(l)
+        }
+    }
+
+    private func syncAllLayers(force: Bool) {
+        syncVisLayer()
+        syncMarqueeLayer(force: force)
+        syncTimeLayer(force: force)
+        syncPositionThumbLayer(force: force)
+    }
+
+    private var showsVisLayer: Bool {
+        guard Env.player != nil, !isShaded else { return false }
+        let p = player
+        guard p.visualizer.mode != .off else { return false }
+        if p.needsAudioPermission, p.state == .playing || p.state == .paused { return false }
+        return true
+    }
+
+    private func syncVisLayer() {
+        ensureLayersAttached()
+        let r = MainLayout.visualizer
+        visLayer.frame = CGRect(x: r.minX * scale, y: r.minY * scale, width: r.width * scale, height: r.height * scale)
+        let show = showsVisLayer
+        visLayer.isHidden = !show
+        if show {
+            if !player.visualizer.isSettled, player.state != .playing {
+                _ = player.renderVisualizer()
+            } else if visLayer.contents == nil {
+                _ = player.visualizer.render(samples: [])
+            }
+            uploadVisSurface()
+        }
+    }
+
+    private func updateVisLayerContents() {
+        guard showsVisLayer else { visLayer.isHidden = true; return }
+        ensureLayersAttached()
+        visLayer.isHidden = false
+        uploadVisSurface()
+    }
+
+    private func marqueeVisibleText() -> String {
+        let r = MainLayout.marquee
+        let text = (sliderMessage ?? player.flashMessage ?? player.marqueeTitle).uppercased()
+        let fits = text.count * 5 <= Int(r.width)
+        if fits || sliderMessage != nil || player.flashMessage != nil { return text }
+        let loop = text + "  ***  "
+        let chars = Array(loop)
+        let start = (marqueeDrag?.offset ?? marqueeOffset) % chars.count
+        return String((0..<32).map { chars[(start + $0) % chars.count] })
+    }
+
+    private func syncMarqueeLayer(force: Bool = false) {
+        guard Env.player != nil, Env.skins != nil else { return }
+        ensureLayersAttached()
+        let r = MainLayout.marquee
+        marqueeLayer.frame = CGRect(x: r.minX * scale, y: r.minY * scale, width: r.width * scale, height: r.height * scale)
+        if isShaded {
+            marqueeLayer.isHidden = true
+            return
+        }
+        marqueeLayer.isHidden = false
+        let visible = marqueeVisibleText()
+        let skinID = ObjectIdentifier(skin)
+        guard force || visible != lastMarqueeText || skinID != lastMarqueeSkin else { return }
+        lastMarqueeText = visible
+        lastMarqueeSkin = skinID
+        let w = Int(r.width), h = Int(r.height)
+        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: Self.layerColorSpace, bitmapInfo: bitmapInfo.rawValue) else { return }
+        ctx.interpolationQuality = .none
+        var x: CGFloat = 0
+        for ch in visible {
+            guard x < CGFloat(w) else { break }
+            if let img = skin.image(Sprites.character(ch)) {
+                ctx.draw(img, in: CGRect(x: x, y: 0, width: CGFloat(img.width), height: CGFloat(img.height)))
+            }
+            x += 5
+        }
+        marqueeLayer.contents = ctx.makeImage()
+    }
+
+    private func syncTimeLayer(force: Bool) {
+        guard Env.player != nil, Env.skins != nil else { return }
+        ensureLayersAttached()
+        timeLayer.frame = CGRect(x: 38 * scale, y: 26 * scale, width: 61 * scale, height: 13 * scale)
+        let p = player
+        guard !isShaded, p.state != .stopped else {
+            timeLayer.isHidden = true
+            lastDisplayedSecond = -1
+            return
+        }
+        timeLayer.isHidden = (p.state == .paused && blinkHidden)
+        let (neg, ms) = displayedTime()
+        let total = Int(ms / 1000)
+        let skinID = ObjectIdentifier(skin)
+        guard force || total != lastDisplayedSecond || neg != lastDisplayedNeg || skinID != lastTimeSkin else { return }
+        lastDisplayedSecond = total
+        lastDisplayedNeg = neg
+        lastTimeSkin = skinID
+        let minutes = min(99, total / 60), seconds = total % 60
+        let ex = skin.usesNumsEx
+        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
+        guard let ctx = CGContext(data: nil, width: 61, height: 13, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: Self.layerColorSpace, bitmapInfo: bitmapInfo.rawValue) else { return }
+        ctx.interpolationQuality = .none
+        func drawSprite(_ s: Sprite, x: CGFloat, yTop: CGFloat) {
+            guard let img = skin.image(s) else { return }
+            let h = CGFloat(img.height)
+            ctx.draw(img, in: CGRect(x: x, y: 13 - yTop - h, width: CGFloat(img.width), height: h))
+        }
+        if neg {
+            if ex { drawSprite(Sprites.minusSignEx, x: 0, yTop: 0) }
+            else { drawSprite(Sprites.minusSign, x: 0, yTop: 6) }
+        }
+        drawSprite(Sprites.digit(minutes / 10, ex: ex), x: 10, yTop: 0)
+        drawSprite(Sprites.digit(minutes % 10, ex: ex), x: 22, yTop: 0)
+        drawSprite(Sprites.digit(seconds / 10, ex: ex), x: 40, yTop: 0)
+        drawSprite(Sprites.digit(seconds % 10, ex: ex), x: 52, yTop: 0)
+        timeLayer.contents = ctx.makeImage()
+    }
+
+    private func syncPositionThumbLayer(force: Bool) {
+        guard Env.player != nil, Env.skins != nil else { return }
+        ensureLayersAttached()
+        let p = player
+        guard !isShaded, p.state != .stopped, p.durationMs > 0 else {
+            positionThumbLayer.isHidden = true
+            lastThumbX = -1
+            return
+        }
+        let f = scrubFraction ?? p.positionMs / p.durationMs
+        let dx = (max(0, min(1, f)) * (248 - 29)).rounded()
+        let thumbX = Int(dx)
+        let pressed = isPressed("position")
+        let skinID = ObjectIdentifier(skin)
+        positionThumbLayer.isHidden = false
+        positionThumbLayer.frame = CGRect(x: (MainLayout.position.minX + dx) * scale,
+                                          y: MainLayout.position.minY * scale,
+                                          width: 29 * scale, height: 10 * scale)
+        if force || pressed != lastThumbPressed || skinID != lastThumbSkin || positionThumbLayer.contents == nil {
+            lastThumbPressed = pressed
+            lastThumbSkin = skinID
+            positionThumbLayer.contents = skin.image(pressed ? Sprites.positionThumbPressed : Sprites.positionThumb)
+        }
+        lastThumbX = thumbX
+    }
+
+    private func uploadVisSurface() {
+        guard !visSurfaces.isEmpty else {
+            visLayer.contents = player.visualizer.makeImage()
+            return
+        }
+        visSurfaceIndex = (visSurfaceIndex + 1) % visSurfaces.count
+        let surface = visSurfaces[visSurfaceIndex]
+        IOSurfaceLock(surface, [], nil)
+        let dst = IOSurfaceGetBaseAddress(surface).assumingMemoryBound(to: UInt32.self)
+        let dstStride = IOSurfaceGetBytesPerRow(surface) / 4
+        let w = ClassicVisualizer.width, h = ClassicVisualizer.height
+        player.visualizer.pixels.withUnsafeBufferPointer { srcBuf in
+            guard let src = srcBuf.baseAddress else { return }
+            for y in 0..<h {
+                let sRow = src + y * w
+                let dRow = dst + y * dstStride
+                for x in 0..<w {
+                    let p = sRow[x]
+                    // RGBA (0xAABBGGRR) → BGRA (0xAARRGGBB)
+                    dRow[x] = (p & 0xFF00_FF00) | ((p & 0x0000_00FF) << 16) | ((p & 0x00FF_0000) >> 16)
+                }
+            }
+        }
+        IOSurfaceUnlock(surface, [], nil)
+        visLayer.contents = surface
+    }
+
+    private var isWindowVisibleOnScreen: Bool {
+        guard let w = window, w.isVisible, !w.isMiniaturized else { return false }
+        return w.occlusionState.contains(.visible)
+    }
+
+    private var visNeedsTimer: Bool {
+        guard !isShaded, player.visualizer.mode != .off, !player.needsAudioPermission else { return false }
+        let hasAudioFeed = player.currentIsLocal || player.tap.isAttached
+        return (player.state == .playing && hasAudioFeed) || !player.visualizer.isSettled
+    }
+
+    private func refreshMarqueeScroll() {
+        guard Env.player != nil, !isShaded, sliderMessage == nil, player.flashMessage == nil, marqueeDrag == nil else {
+            cachedMarqueeScroll = false
+            return
+        }
+        cachedMarqueeScroll = player.marqueeTitle.uppercased().count * 5 > Int(MainLayout.marquee.width)
+    }
+
+    private var desiredCadence: Cadence {
+        guard isWindowVisibleOnScreen else { return .off }
+        if visNeedsTimer { return .hz30 }
+        if cachedMarqueeScroll { return .hz5 }
+        if !isShaded && player.state == .paused { return .hz1 }
+        return .off
+    }
+
+    private func updateAnimationTimer() {
+        guard Env.player != nil else { return }
+        let target = desiredCadence
+        guard target != cadence else { return }
+        timer?.invalidate()
+        timer = nil
+        cadence = target
+        guard target != .off else { return }
+        let now = CACurrentMediaTime()
+        lastMarqueeAdvance = now
+        lastBlinkToggle = now
+        let t = Timer(timeInterval: target.interval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.tick() }
+        }
+        t.tolerance = target.tolerance
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+    }
+
     private func tick() {
-        player.renderVisualizer()
-        marqueeTick += 1
-        if marqueeTick % 12 == 0 { marqueeOffset += 1 } // one character every 200 ms
-        blinkTick += 1
-        needsDisplay = true
+        guard isWindowVisibleOnScreen else { updateAnimationTimer(); return }
+        let now = CACurrentMediaTime()
+
+        if cadence == .hz30 {
+            if player.renderVisualizer() { updateVisLayerContents() }
+            if player.visualizer.isSettled { updateAnimationTimer() }
+        }
+        if cachedMarqueeScroll, now - lastMarqueeAdvance >= 0.195 {
+            marqueeOffset += 1
+            lastMarqueeAdvance = now
+            syncMarqueeLayer()
+        }
+        if !isShaded && player.state == .paused, now - lastBlinkToggle >= 0.99 {
+            blinkHidden.toggle()
+            lastBlinkToggle = now
+            timeLayer.isHidden = blinkHidden
+        }
     }
 
     // Hover hint over the scrolling title.
     override func layout() {
         super.layout()
+        syncAllLayers(force: false)
         removeAllToolTips()
         guard !isShaded else { return }
         let r = MainLayout.marquee.insetBy(dx: 0, dy: -3)
@@ -52,6 +439,9 @@ final class MainWindowView: SkinView {
     func toggleShade() {
         isShaded.toggle()
         Env.windows.resizeAll()
+        refreshMarqueeScroll()
+        syncAllLayers(force: true)
+        updateAnimationTimer()
         needsDisplay = true
     }
 
@@ -88,19 +478,22 @@ final class MainWindowView: SkinView {
         case .stopped: draw(Sprites.stoppedIndicator, at: MainLayout.playStatus)
         }
 
-        drawTime()
+        let offscreen = NSGraphicsContext.current?.isDrawingToScreen == false
+        if offscreen { drawTime() }
 
-        // Visualizer (or a hint when macOS permission is missing)
+        // Visualizer (or a hint when macOS permission is missing).
+        // On screen, visLayer renders the 76×16 bitmap directly on the GPU; draw into
+        // the CGContext only for off-screen snapshots (cacheDisplay).
         if p.needsAudioPermission, p.visualizer.mode != .off, p.state == .playing || p.state == .paused {
             clip(MainLayout.visualizer) {
                 drawText("CLICK TO", at: CGPoint(x: MainLayout.visualizer.minX + 18, y: MainLayout.visualizer.minY + 1))
                 drawText("ENABLE", at: CGPoint(x: MainLayout.visualizer.minX + 23, y: MainLayout.visualizer.minY + 9))
             }
-        } else if let img = p.visualizer.makeImage() {
+        } else if offscreen, let img = p.visualizer.makeImage() {
             draw(image: img, in: CGRect(origin: MainLayout.visualizer.origin, size: CGSize(width: 76, height: 16)))
         }
 
-        drawMarquee()
+        if offscreen { drawMarquee() }
 
         // kbps / kHz / stereo
         if p.state == .playing || p.state == .paused {
@@ -141,11 +534,12 @@ final class MainWindowView: SkinView {
         draw(Sprites.eqButton(on: Env.windows.equalizer.isVisible, pressed: isPressed("eqToggle")), at: MainLayout.eqButton)
         draw(Sprites.playlistButton(on: Env.windows.playlist.isVisible, pressed: isPressed("plToggle")), at: MainLayout.playlistButton)
 
-        // Position bar
+        // Position bar (on screen, positionThumbLayer moves the thumb without redrawing).
         draw(Sprites.positionBackground, at: MainLayout.position.origin)
-        if p.state != .stopped, p.durationMs > 0 {
+        if offscreen, p.state != .stopped, p.durationMs > 0 {
             let f = scrubFraction ?? p.positionMs / p.durationMs
-            let x = MainLayout.position.minX + (max(0, min(1, f)) * (248 - 29)).rounded()
+            let dx = (max(0, min(1, f)) * (248 - 29)).rounded()
+            let x = MainLayout.position.minX + dx
             draw(isPressed("position") ? Sprites.positionThumbPressed : Sprites.positionThumb, at: x, MainLayout.position.minY)
         }
 
@@ -177,10 +571,11 @@ final class MainWindowView: SkinView {
 
     private func drawTime() {
         let p = player
-        guard p.state != .stopped else { return }
-        if p.state == .paused, (blinkTick / 60) % 2 == 1 { return } // Winamp blinks the time when paused
+        guard p.state != .stopped else { lastDisplayedSecond = -1; return }
         let (neg, ms) = displayedTime()
         let total = Int(ms / 1000)
+        lastDisplayedSecond = total
+        if p.state == .paused, blinkHidden { return } // Winamp blinks the time when paused
         let minutes = min(99, total / 60), seconds = total % 60
         let ex = skin.usesNumsEx
         if neg {
@@ -217,7 +612,10 @@ final class MainWindowView: SkinView {
         if p.state != .stopped {
             let (neg, ms) = displayedTime()
             let t = Int(ms / 1000)
+            lastDisplayedSecond = t
             drawText((neg ? "-" : " ") + String(format: "%02d:%02d", min(99, t / 60), t % 60), at: CGPoint(x: 127, y: 4))
+        } else {
+            lastDisplayedSecond = -1
         }
     }
 
@@ -264,6 +662,7 @@ final class MainWindowView: SkinView {
             h.append(hit) }
         do { let hit: Hit = Hit(rect: MainLayout.time, kind: .button("time") {
                 Settings.timeRemaining.toggle()
+                p.notifyChanged()
             })
             h.append(hit) }
         do { let hit: Hit = Hit(rect: MainLayout.visualizer, kind: .button("vis") {
@@ -287,10 +686,12 @@ final class MainWindowView: SkinView {
                         return
                     }
                     self.marqueeDrag = (pt.x, self.marqueeOffset)
+                    self.updateAnimationTimer()
                 case .dragged:
                     if let d = self.marqueeDrag {
                         if abs(d.start - pt.x) >= 3 { self.marqueeDragged = true }
                         self.marqueeDrag = (d.start, max(0, d.offset + Int((d.start - pt.x) / 5)))
+                        self.needsDisplay = true
                     }
                 case .up:
                     if let d = self.marqueeDrag {
@@ -302,6 +703,8 @@ final class MainWindowView: SkinView {
                         }
                     }
                     self.marqueeDrag = nil
+                    self.needsDisplay = true
+                    self.updateAnimationTimer()
                 }
             })
             h.append(hit) }
@@ -309,6 +712,7 @@ final class MainWindowView: SkinView {
                 let v = Int(((pt.x - MainLayout.volume.minX - 7) / 51 * 100).rounded())
                 p.setVolume(v)
                 self?.sliderMessage = ended ? nil : "VOLUME: \(p.volume)%"
+                self?.updateAnimationTimer()
             })
             h.append(hit) }
         do { let hit: Hit = Hit(rect: MainLayout.balance, kind: .slider("balance") { [weak self] (pt: CGPoint, ended: Bool) in
@@ -317,6 +721,7 @@ final class MainWindowView: SkinView {
                 let side: String = p.balance < 0 ? "LEFT" : "RIGHT"
                 let msg: String = p.balance == 0 ? "CENTER" : "\(abs(p.balance))% \(side)"
                 self?.sliderMessage = ended ? nil : "BALANCE: \(msg)"
+                self?.updateAnimationTimer()
                 if ended { p.audioFeatureUsed("balance") }
             })
             h.append(hit) }
@@ -353,10 +758,12 @@ final class MainWindowView: SkinView {
                 if ended {
                     self.scrubFraction = nil
                     self.sliderMessage = nil
+                    self.updateAnimationTimer()
                     p.seek(fraction: f)
                 } else {
                     self.scrubFraction = f
                     self.sliderMessage = "SEEK TO: \(formatTime(f * p.durationMs))/\(formatTime(p.durationMs)) (\(Int(f * 100))%)"
+                    self.updateAnimationTimer()
                 }
             }))
         }
@@ -370,6 +777,12 @@ final class MainWindowView: SkinView {
             return
         }
         super.mouseDown(with: event)
+        syncPositionThumbLayer(force: false)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        super.mouseUp(with: event)
+        syncPositionThumbLayer(force: false)
     }
 
     override func scrollWheel(with event: NSEvent) {

@@ -79,6 +79,56 @@ final class ClassicVisualizerTests: XCTestCase {
         off.render(samples: sine(500))
         XCTAssertNil(off.makeImage())
     }
+
+    func testVisualizerSettlesOnSilenceAndCachesImage() {
+        let vis = ClassicVisualizer()
+        let silence = [Float](repeating: 0, count: 1024)
+
+        XCTAssertFalse(vis.isSettled)
+        XCTAssertTrue(vis.render(samples: silence), "first silent frame draws background")
+        XCTAssertTrue(vis.isSettled)
+        XCTAssertFalse(vis.render(samples: silence), "already settled silent frame is a no-op")
+
+        let img1 = vis.makeImage()
+        let img2 = vis.makeImage()
+        XCTAssertNotNil(img1)
+        XCTAssertTrue(img1 === img2, "unchanged frame reuses cached CGImage")
+
+        // Signal wakes the analyzer up; silence decays it back to settled.
+        XCTAssertTrue(vis.render(samples: sine(1_000)))
+        XCTAssertFalse(vis.isSettled)
+        var frames = 0
+        while !vis.isSettled && frames < 120 {
+            XCTAssertTrue(vis.render(samples: silence))
+            frames += 1
+        }
+        XCTAssertTrue(vis.isSettled)
+        XCTAssertGreaterThan(frames, 5)
+        XCTAssertTrue(vis.barHeights.allSatisfy { $0 == 0 })
+        XCTAssertTrue(vis.peakHeights.allSatisfy { $0 == 0 })
+        XCTAssertFalse(vis.render(samples: silence))
+
+        // Oscilloscope settles after one silent frame.
+        vis.mode = .oscilloscope
+        XCTAssertFalse(vis.isSettled)
+        XCTAssertTrue(vis.render(samples: sine(500, amplitude: 0.4)))
+        XCTAssertFalse(vis.isSettled)
+        XCTAssertTrue(vis.render(samples: silence))
+        XCTAssertTrue(vis.isSettled)
+        XCTAssertFalse(vis.render(samples: silence))
+
+        // 30 Hz cadence scales falloff so bars decay in half as many frames (~same wall time).
+        let vis30 = ClassicVisualizer()
+        vis30.frameRate = 30
+        vis30.render(samples: sine(1_000))
+        var frames30 = 0
+        while !vis30.isSettled && frames30 < 120 {
+            vis30.render(samples: silence)
+            frames30 += 1
+        }
+        XCTAssertTrue(vis30.isSettled)
+        XCTAssertLessThan(frames30, frames)
+    }
 }
 
 final class EqualizerTests: XCTestCase {

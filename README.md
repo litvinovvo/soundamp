@@ -55,6 +55,7 @@ App switches for debugging: `--headless`, `--quit-when settled|finished|handover
 
 | Key | Action |
 |---|---|
+| Space | play / pause |
 | Z / X / C / V / B | previous, play, pause, stop, next |
 | S / R | shuffle, repeat |
 | L or ⌘L | add a link |

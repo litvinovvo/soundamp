@@ -18,16 +18,26 @@ public final class ClassicVisualizer {
     /// How many samples `render` wants (FFT size).
     public static let samplesNeeded = 1024
 
-    public var mode: Mode = .analyzer
-    public var analyzerStyle: AnalyzerStyle = .normal
-    public var bandwidth: Bandwidth = .wide
-    public var oscilloscopeStyle: OscilloscopeStyle = .lines
-    public var peaks = true
+    public var mode: Mode = .analyzer { didSet { if mode != oldValue { invalidateRender() } } }
+    public var analyzerStyle: AnalyzerStyle = .normal { didSet { if analyzerStyle != oldValue { invalidateRender() } } }
+    public var bandwidth: Bandwidth = .wide { didSet { if bandwidth != oldValue { invalidateRender() } } }
+    public var oscilloscopeStyle: OscilloscopeStyle = .lines { didSet { if oscilloscopeStyle != oldValue { invalidateRender() } } }
+    public var peaks = true { didSet { if peaks != oldValue { invalidateRender() } } }
     public var falloff: Falloff = .moderate
     public var peakFalloff: Falloff = .slow
+    /// Render cadence in Hz; scales bar/peak falloff so decay speed matches wall time.
+    public var frameRate: Float = 60
     public var colors: [RGBA] = SkinText.defaultVisColors {
-        didSet { if colors.count < 24 { colors += SkinText.defaultVisColors[colors.count...] } }
+        didSet {
+            if colors.count < 24 { colors += SkinText.defaultVisColors[colors.count...] }
+            rebuildBackground()
+            invalidateRender()
+        }
     }
+
+    /// True once the visualizer has settled onto its static silent state (or is off),
+    /// so the UI doesn't need to keep driving it at 60 Hz while paused/stopped.
+    public var isSettled: Bool { mode == .off || isSettledSilent }
 
     /// RGBA pixels, row-major, top row first.
     public private(set) var pixels = [UInt32](repeating: 0, count: width * height)
@@ -35,11 +45,17 @@ public final class ClassicVisualizer {
     public private(set) var barHeights = [Float](repeating: 0, count: width)
     public private(set) var peakHeights = [Float](repeating: 0, count: width)
 
+    private struct BinSample { let i1: Int; let i2: Int; let f: Float }
+
+    private static let colorSpace = CGColorSpaceCreateDeviceRGB()
+
     private let columns = 75
     private let maxHeight: Float = 16
     private let fftSize = 1024
     private let log2n: vDSP_Length = 10
     private let setup: FFTSetup
+    private let binMap: [BinSample]
+    private var backgroundPixels = [UInt32](repeating: 0, count: width * height)
     private var window = [Float](repeating: 0, count: 1024)
     private var windowed = [Float](repeating: 0, count: 1024)
     private var real = [Float](repeating: 0, count: 512)
@@ -50,46 +66,88 @@ public final class ClassicVisualizer {
     private var saPeaks = [Float](repeating: 0, count: 76)
     private var saPeakSpeed = [Float](repeating: 0, count: 76)
     private var lastOscY = 0
+    private var hasRendered = false
+    private var isSettledSilent = false
+    private var cachedImage: CGImage?
 
     public init() {
         setup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2))!
         vDSP_hann_window(&window, vDSP_Length(fftSize), Int32(vDSP_HANN_NORM))
+        // Column → FFT bin: 91% logarithmic, 9% linear (Webamp's Winamp approximation).
+        let maxIndex = 512
+        let logMax = log10(Float(maxIndex))
+        let cols = 75
+        binMap = (0..<cols).map { x in
+            let linear = Float(x) / Float(cols - 1) * Float(maxIndex - 1)
+            let logIndex = pow(10, logMax * Float(x) / Float(cols - 1))
+            let idx = 0.09 * linear + 0.91 * logIndex
+            let i1 = min(maxIndex - 1, Int(idx.rounded(.down)))
+            let i2 = min(maxIndex - 1, Int(idx.rounded(.up)))
+            return BinSample(i1: i1, i2: i2, f: idx - Float(i1))
+        }
+        rebuildBackground()
     }
 
     deinit { vDSP_destroy_fftsetup(setup) }
 
     public func reset() {
         for i in 0..<76 { saFalloff[i] = 0; saPeaks[i] = 0; saPeakSpeed[i] = 0; barHeights[i] = 0; peakHeights[i] = 0 }
+        invalidateRender()
+    }
+
+    private func invalidateRender() {
+        isSettledSilent = false
+        cachedImage = nil
     }
 
     /// Render one frame from the latest mono samples (≥ 1024 for the analyzer,
     /// the last 576 are used by the oscilloscope). Pass silence when stopped.
-    public func render(samples: [Float]) {
+    /// Returns true if the rendered pixels changed.
+    @discardableResult
+    public func render(samples: [Float]) -> Bool {
+        let silent = samples.allSatisfy { $0 == 0 }
+        if silent, hasRendered, isSettled { return false }
+
+        hasRendered = true
+        cachedImage = nil
         drawBackground()
         switch mode {
-        case .analyzer: renderAnalyzer(samples)
-        case .oscilloscope: renderOscilloscope(samples)
-        case .off: break
+        case .analyzer: renderAnalyzer(samples, silent: silent)
+        case .oscilloscope: renderOscilloscope(samples, silent: silent)
+        case .off: isSettledSilent = true
         }
+        return true
     }
 
     public func makeImage() -> CGImage? {
         guard mode != .off else { return nil }
+        if !hasRendered { render(samples: []) }
+        if let cachedImage { return cachedImage }
         let data = pixels.withUnsafeBufferPointer { Data(buffer: $0) }
         guard let provider = CGDataProvider(data: data as CFData) else { return nil }
-        return CGImage(width: Self.width, height: Self.height, bitsPerComponent: 8, bitsPerPixel: 32,
-                       bytesPerRow: Self.width * 4, space: CGColorSpaceCreateDeviceRGB(),
-                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
-                       provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+        let img = CGImage(width: Self.width, height: Self.height, bitsPerComponent: 8, bitsPerPixel: 32,
+                          bytesPerRow: Self.width * 4, space: Self.colorSpace,
+                          bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+                          provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+        cachedImage = img
+        return img
     }
 
     // MARK: Background
 
-    private func drawBackground() {
+    private func rebuildBackground() {
         let bg = colors[0].packed, dot = colors[1].packed
         for y in 0..<Self.height {
             for x in 0..<Self.width {
-                pixels[y * Self.width + x] = (x % 2 == 0 && y % 2 == 1) ? dot : bg
+                backgroundPixels[y * Self.width + x] = (x % 2 == 0 && y % 2 == 1) ? dot : bg
+            }
+        }
+    }
+
+    private func drawBackground() {
+        pixels.withUnsafeMutableBufferPointer { dst in
+            backgroundPixels.withUnsafeBufferPointer { src in
+                dst.baseAddress!.update(from: src.baseAddress!, count: Self.width * Self.height)
             }
         }
     }
@@ -132,24 +190,21 @@ public final class ClassicVisualizer {
         }
     }
 
-    private func renderAnalyzer(_ samples: [Float]) {
-        spectrum(samples)
-
-        // Column → FFT bin: 91% logarithmic, 9% linear (Webamp's Winamp approximation).
-        let maxIndex = 512
-        let logMax = log10(Float(maxIndex))
-        for x in 0..<columns {
-            let linear = Float(x) / Float(columns - 1) * Float(maxIndex - 1)
-            let logIndex = pow(10, logMax * Float(x) / Float(columns - 1))
-            let idx = 0.09 * linear + 0.91 * logIndex
-            let i1 = min(maxIndex - 1, Int(idx.rounded(.down)))
-            let i2 = min(maxIndex - 1, Int(idx.rounded(.up)))
-            let f = idx - Float(i1)
-            sample[x] = i1 == i2 ? magnitudes[i1] : (1 - f) * magnitudes[i1] + f * magnitudes[i2]
+    private func renderAnalyzer(_ samples: [Float], silent: Bool) {
+        if silent {
+            for x in 0..<columns { sample[x] = 0 }
+        } else {
+            spectrum(samples)
+            for x in 0..<columns {
+                let b = binMap[x]
+                sample[x] = b.i1 == b.i2 ? magnitudes[b.i1] : (1 - b.f) * magnitudes[b.i1] + b.f * magnitudes[b.i2]
+            }
         }
 
-        let fall = Float(falloffRate(falloff)) / 16
-        let peakAccel = peakFalloffRate(peakFalloff)
+        let dtScale = max(0.25, 60 / max(1, frameRate))
+        let fall = Float(falloffRate(falloff)) / 16 * dtScale
+        let peakAccel = pow(peakFalloffRate(peakFalloff), dtScale)
+        var anyActive = false
 
         for x in 0..<columns {
             var value: Float
@@ -170,8 +225,10 @@ public final class ClassicVisualizer {
                 saPeakSpeed[x] = 3
             }
             let peak = saPeaks[x] / 256
-            saPeaks[x] = max(0, saPeaks[x] - saPeakSpeed[x])
+            saPeaks[x] = max(0, saPeaks[x] - saPeakSpeed[x] * dtScale)
             saPeakSpeed[x] *= peakAccel
+
+            if saFalloff[x] > 0 || saPeaks[x] > 0 || peak > 0 { anyActive = true }
 
             barHeights[x] = saFalloff[x]
             peakHeights[x] = peak
@@ -179,6 +236,7 @@ public final class ClassicVisualizer {
             if bandwidth == .wide && x == chunk + 3 { continue } // 1px gap between 3px bands
             drawBar(x: x, height: Int(saFalloff[x].rounded()), peak: Int(peak.rounded()))
         }
+        isSettledSilent = silent && !anyActive
     }
 
     private func drawBar(x: Int, height h: Int, peak: Int) {
@@ -221,7 +279,7 @@ public final class ClassicVisualizer {
         }
     }
 
-    private func renderOscilloscope(_ samples: [Float]) {
+    private func renderOscilloscope(_ samples: [Float], silent: Bool) {
         let window = 576
         let start = max(0, samples.count - window)
         let slice = window / 75
@@ -245,5 +303,6 @@ public final class ClassicVisualizer {
             let c = 18 + oscColorIndex(y)
             for yy in top...bottom { set(x, yy, c) }
         }
+        isSettledSilent = silent
     }
 }

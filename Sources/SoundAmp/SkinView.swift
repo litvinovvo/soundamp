@@ -282,6 +282,7 @@ class SkinView: NSView {
     override func keyDown(with event: NSEvent) {
         if event.modifierFlags.intersection([.command, .control, .option]).isEmpty, let c = event.charactersIgnoringModifiers?.lowercased() {
             switch c {
+            case " ": if !event.isARepeat { player.playPause() }; return
             case "z": player.previous(); return
             case "x": player.playButton(); return
             case "c": player.pauseButton(); return

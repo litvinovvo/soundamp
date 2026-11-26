@@ -147,7 +147,18 @@ public final class Skin {
     }
 
     static func decodeImage(_ data: Data) -> CGImage? {
-        guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
-        return CGImageSourceCreateImageAtIndex(src, 0, nil)
+        guard let src = CGImageSourceCreateWithData(data as CFData, nil),
+              let raw = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
+        let w = raw.width, h = raw.height
+        guard w > 0, h > 0 else { return raw }
+        // Eagerly decode BMP/RLE/PNG once into native 32-bit BGRA so cropping & drawing
+        // sprites never re-runs ImageIO decoders or vImage format conversions per frame.
+        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: bitmapInfo.rawValue) else {
+            return raw
+        }
+        ctx.draw(raw, in: CGRect(x: 0, y: 0, width: w, height: h))
+        return ctx.makeImage() ?? raw
     }
 }

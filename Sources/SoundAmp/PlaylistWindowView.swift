@@ -1,4 +1,5 @@
 import AppKit
+import QuartzCore
 import SoundAmpCore
 
 /// The classic resizable playlist editor.
@@ -9,6 +10,86 @@ final class PlaylistWindowView: SkinView {
     private var reorderFrom: Int?
     private var resizeStart: (mouse: NSPoint, segments: (w: Int, h: Int))?
     private var scrollDragOffset: CGFloat?
+    private var lastMiniSecond = -1
+    private var lastMiniSkin: ObjectIdentifier?
+    /// Dedicated 25×6 layer for the mini clock so 1 Hz time ticks don't redraw every
+    /// playlist row with CoreText.
+    private let miniTimeLayer: CALayer = {
+        let l = CALayer()
+        l.magnificationFilter = .nearest
+        l.minificationFilter = .nearest
+        l.contentsScale = 1
+        l.actions = [
+            "contents": NSNull(),
+            "bounds": NSNull(),
+            "position": NSNull(),
+            "frame": NSNull(),
+            "hidden": NSNull(),
+        ]
+        return l
+    }()
+    private static let miniColorSpace = CGColorSpaceCreateDeviceRGB()
+
+    override var scale: CGFloat { didSet { syncMiniTimeLayer(force: false) } }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        NotificationCenter.default.addObserver(self, selector: #selector(positionChanged), name: PlayerController.positionDidChange, object: nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        syncMiniTimeLayer(force: true)
+    }
+
+    override func layout() {
+        super.layout()
+        syncMiniTimeLayer(force: false)
+    }
+
+    override func redraw() {
+        super.redraw()
+        syncMiniTimeLayer(force: true)
+    }
+
+    @objc private func positionChanged() {
+        guard let w = window, w.isVisible, !w.isMiniaturized, w.occlusionState.contains(.visible) else { return }
+        syncMiniTimeLayer(force: false)
+    }
+
+    private func syncMiniTimeLayer(force: Bool) {
+        guard Env.player != nil, Env.skins != nil, let root = layer else { return }
+        if miniTimeLayer.superlayer !== root { root.addSublayer(miniTimeLayer) }
+        let w = skinSize.width, h = skinSize.height
+        miniTimeLayer.frame = CGRect(x: (w - 84) * scale, y: (h - 15) * scale, width: 25 * scale, height: 6 * scale)
+        guard player.state != .stopped else {
+            miniTimeLayer.isHidden = true
+            lastMiniSecond = -1
+            return
+        }
+        miniTimeLayer.isHidden = false
+        let sec = Int(player.positionMs / 1000)
+        let skinID = ObjectIdentifier(skin)
+        guard force || sec != lastMiniSecond || skinID != lastMiniSkin else { return }
+        lastMiniSecond = sec
+        lastMiniSkin = skinID
+        let text = String(format: "%2d:%02d", min(99, sec / 60), sec % 60)
+        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
+        guard let ctx = CGContext(data: nil, width: 25, height: 6, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: Self.miniColorSpace, bitmapInfo: bitmapInfo.rawValue) else { return }
+        ctx.interpolationQuality = .none
+        var x: CGFloat = 0
+        for ch in text {
+            if let img = skin.image(Sprites.character(ch)) {
+                ctx.draw(img, in: CGRect(x: x, y: 0, width: CGFloat(img.width), height: CGFloat(img.height)))
+            }
+            x += 5
+        }
+        miniTimeLayer.contents = ctx.makeImage()
+    }
 
     override var skinSize: CGSize {
         CGSize(width: 275 + 25 * CGFloat(segments.w), height: 116 + 29 * CGFloat(segments.h))
@@ -63,7 +144,7 @@ final class PlaylistWindowView: SkinView {
         let sel = pl.selection.isEmpty ? nil : pl.totalDuration(of: pl.selection)
         let text = "\(sel.map { formatTime($0.ms) } ?? "0:00")/\(formatTime(total.ms))\(total.complete ? "" : "+")"
         clip(CGRect(x: w - 143, y: h - 28, width: 90, height: 6)) { drawText(text, at: CGPoint(x: w - 143, y: h - 28)) }
-        if player.state != .stopped {
+        if NSGraphicsContext.current?.isDrawingToScreen == false, player.state != .stopped {
             let t = Int(player.positionMs / 1000)
             drawText(String(format: "%2d:%02d", min(99, t / 60), t % 60), at: CGPoint(x: w - 84, y: h - 15))
         }

@@ -53,9 +53,18 @@ enum Settings {
         get { d.object(forKey: "uiScale") as? Double ?? (d.bool(forKey: "doubleSize") ? 2 : 1) }
         set { d.set(newValue, forKey: "uiScale") }
     }
+    private static var _alwaysOnTop: Bool?
     static var alwaysOnTop: Bool {
-        get { d.bool(forKey: "alwaysOnTop") }
-        set { d.set(newValue, forKey: "alwaysOnTop") }
+        get {
+            if let v = _alwaysOnTop { return v }
+            let v = d.bool(forKey: "alwaysOnTop")
+            _alwaysOnTop = v
+            return v
+        }
+        set {
+            _alwaysOnTop = newValue
+            d.set(newValue, forKey: "alwaysOnTop")
+        }
     }
     static var showEqualizer: Bool {
         get { d.object(forKey: "showEqualizer") as? Bool ?? true }
@@ -74,9 +83,18 @@ enum Settings {
         get { d.object(forKey: "artworkHeight") as? Double ?? 232 }
         set { d.set(newValue, forKey: "artworkHeight") }
     }
+    private static var _timeRemaining: Bool?
     static var timeRemaining: Bool {
-        get { d.bool(forKey: "timeRemaining") }
-        set { d.set(newValue, forKey: "timeRemaining") }
+        get {
+            if let v = _timeRemaining { return v }
+            let v = d.bool(forKey: "timeRemaining")
+            _timeRemaining = v
+            return v
+        }
+        set {
+            _timeRemaining = newValue
+            d.set(newValue, forKey: "timeRemaining")
+        }
     }
     static var autoAttachTap: Bool {
         get { d.object(forKey: "autoAttachTap") as? Bool ?? true }
